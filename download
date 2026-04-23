@@ -1,4 +1,773 @@
-node_modules/
-build/
-.env
-.DS_Store
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { supabase } from './supabase';
+
+/* ── Constants ── */
+const USER_ID = 'yellowlight_default'; // Single-user mode. Replace with auth later.
+
+const C = {
+  black:'#0a0a0a', blackDeep:'#050505', blackMid:'#111111', blackSoft:'#1a1a1a',
+  yellow:'#f5c800', yellowBright:'#ffe033', yellowDim:'#c9a200',
+  yellowFaint:'rgba(245,200,0,0.08)', yellowGlow:'rgba(245,200,0,0.18)', yellowGlow2:'rgba(245,200,0,0.35)',
+  white:'#ffffff', whiteDim:'rgba(255,255,255,0.85)',
+  whiteFaint:'rgba(255,255,255,0.06)', whiteFaint2:'rgba(255,255,255,0.12)',
+  border:'rgba(255,255,255,0.08)', borderYellow:'rgba(245,200,0,0.25)',
+  glass:'rgba(20,20,20,0.55)', glassBright:'rgba(30,30,30,0.75)',
+  green:'#22c55e', greenDim:'rgba(34,197,94,0.15)',
+  red:'#ef4444', redDim:'rgba(239,68,68,0.15)',
+  orange:'#f97316', orangeDim:'rgba(249,115,22,0.15)',
+  muted:'rgba(255,255,255,0.38)',
+};
+const FONT_HEAD = "'Bebas Neue', Impact, sans-serif";
+const FONT_BODY = "'DM Sans', 'Helvetica Neue', sans-serif";
+
+const fmt = (n) => Number(n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const today = () => new Date().toISOString().split('T')[0];
+const addDays = (d,n) => { const x=new Date(d); x.setDate(x.getDate()+n); return x.toISOString().split('T')[0]; };
+const uid = () => Math.random().toString(36).slice(2)+Date.now();
+const getTotal = (inv) => { const s=getSubtotal(inv); return s+s*((inv.tax_rate||0)/100)-s*((inv.discount||0)/100); };
+const getSubtotal = (inv) => (inv.items||[]).reduce((s,i)=>s+Number(i.qty)*Number(i.price),0);
+const sym = (currency) => ({USD:'$',EUR:'€',GBP:'£',CAD:'CA$',AUD:'A$'}[currency]||'$');
+
+/* ── UI Primitives ── */
+
+function GlassCard({children, yellow, style={}, className=''}) {
+  return <div className={`${yellow?'glass-card-yellow':'glass-card'} ${className}`} style={{borderRadius:16,padding:24,...style}}>{children}</div>;
+}
+
+function Btn({children,onClick,variant='primary',small,disabled,full,style={},title}) {
+  const base = {cursor:disabled?'not-allowed':'pointer',border:'none',fontFamily:FONT_BODY,fontWeight:600,display:'inline-flex',alignItems:'center',gap:6,opacity:disabled?0.4:1,borderRadius:10,whiteSpace:'nowrap',padding:small?'7px 16px':'11px 22px',fontSize:small?13:14,width:full?'100%':undefined,justifyContent:full?'center':undefined,...style};
+  const vars = {
+    primary:{background:`linear-gradient(135deg,${C.yellow},${C.yellowDim})`,color:C.black,boxShadow:`0 4px 20px ${C.yellowGlow2}`},
+    secondary:{background:C.whiteFaint2,color:C.whiteDim,border:`1px solid ${C.border}`},
+    ghost:{background:'transparent',color:C.muted},
+    danger:{background:C.redDim,color:C.red,border:`1px solid rgba(239,68,68,0.2)`},
+    success:{background:C.greenDim,color:C.green,border:`1px solid rgba(34,197,94,0.2)`},
+  };
+  return <button onClick={disabled?undefined:onClick} title={title} className="glass-btn" style={{...base,...vars[variant]}}>{children}</button>;
+}
+
+function Field({label,value,onChange,type='text',placeholder,required,multiline,rows=3,options,style={}}) {
+  const inputStyle = {background:'rgba(255,255,255,0.05)',border:`1px solid ${C.border}`,borderRadius:10,padding:'10px 14px',fontSize:14,fontFamily:FONT_BODY,color:C.white,outline:'none',width:'100%',transition:'all 0.2s',...style};
+  const onFocus = e=>{e.target.style.borderColor=C.borderYellow;e.target.style.background=C.yellowFaint;};
+  const onBlur = e=>{e.target.style.borderColor=C.border;e.target.style.background='rgba(255,255,255,0.05)';};
+  return (
+    <div style={{display:'flex',flexDirection:'column',gap:6}}>
+      {label&&<label style={{fontSize:11,fontWeight:600,color:C.muted,letterSpacing:'0.07em',textTransform:'uppercase'}}>{label}{required&&<span style={{color:C.yellow}}> *</span>}</label>}
+      {options ? (
+        <select value={value} onChange={e=>onChange(e.target.value)} onFocus={onFocus} onBlur={onBlur} style={{...inputStyle,cursor:'pointer'}}>
+          {options.map(o=><option key={o.value||o} value={o.value||o} style={{background:C.blackMid}}>{o.label||o}</option>)}
+        </select>
+      ) : multiline ? (
+        <textarea value={value||''} onChange={e=>onChange(e.target.value)} rows={rows} placeholder={placeholder} onFocus={onFocus} onBlur={onBlur} style={{...inputStyle,resize:'vertical'}}/>
+      ) : (
+        <input type={type} value={value||''} onChange={e=>onChange(e.target.value)} placeholder={placeholder} onFocus={onFocus} onBlur={onBlur} style={inputStyle}/>
+      )}
+    </div>
+  );
+}
+
+function Badge({status}) {
+  const map = {
+    draft:{bg:'rgba(255,255,255,0.08)',color:C.muted,label:'Draft'},
+    sent:{bg:C.orangeDim,color:C.orange,label:'Sent'},
+    paid:{bg:C.greenDim,color:C.green,label:'Paid'},
+    overdue:{bg:C.redDim,color:C.red,label:'Overdue'},
+    partial:{bg:'rgba(245,200,0,0.15)',color:C.yellow,label:'Partial'},
+  };
+  const s=map[status]||map.draft;
+  return <span style={{background:s.bg,color:s.color,padding:'3px 11px',borderRadius:20,fontSize:11,fontWeight:700,letterSpacing:'0.06em',textTransform:'uppercase'}}>{s.label}</span>;
+}
+
+function StatCard({icon,label,value,sub,yellow}) {
+  return (
+    <GlassCard yellow={yellow} className="fade-up" style={{padding:'22px 24px'}}>
+      <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between'}}>
+        <div>
+          <div style={{fontSize:11,fontWeight:600,color:yellow?C.yellow:C.muted,textTransform:'uppercase',letterSpacing:'0.08em',marginBottom:8}}>{label}</div>
+          <div style={{fontSize:28,fontWeight:700,color:yellow?C.yellow:C.white,letterSpacing:'-0.02em',lineHeight:1}}>{value}</div>
+          {sub&&<div style={{fontSize:12,color:C.muted,marginTop:6}}>{sub}</div>}
+        </div>
+        <div style={{fontSize:28,opacity:0.7}}>{icon}</div>
+      </div>
+    </GlassCard>
+  );
+}
+
+function Modal({children,onClose,title,wide}) {
+  return (
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.8)',zIndex:1000,display:'flex',alignItems:'center',justifyContent:'center',padding:24,backdropFilter:'blur(6px)'}} onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div className="glass-card fade-up" style={{width:'100%',maxWidth:wide?760:520,maxHeight:'90vh',overflowY:'auto',borderRadius:20}}>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'20px 28px',borderBottom:`1px solid ${C.border}`}}>
+          <div style={{fontFamily:FONT_HEAD,fontSize:22,letterSpacing:'0.04em',color:C.yellow}}>{title}</div>
+          <button onClick={onClose} style={{background:'none',border:'none',color:C.muted,fontSize:20,cursor:'pointer'}}>✕</button>
+        </div>
+        <div style={{padding:28}}>{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function Toast({msg,type='success'}) {
+  const colors={success:C.green,error:C.red,info:C.yellow};
+  return (
+    <div className="fade-up" style={{position:'fixed',top:24,right:24,zIndex:9999,background:C.glassBright,border:`1px solid ${colors[type]}33`,borderLeft:`3px solid ${colors[type]}`,borderRadius:12,padding:'14px 20px',fontSize:14,color:C.white,boxShadow:'0 8px 32px rgba(0,0,0,0.4)',display:'flex',alignItems:'center',gap:10}}>
+      <span style={{color:colors[type]}}>{type==='success'?'✓':type==='error'?'✕':'●'}</span>{msg}
+    </div>
+  );
+}
+
+function Loader({text='Loading…'}) {
+  return (
+    <div style={{minHeight:'100vh',background:C.black,display:'flex',alignItems:'center',justifyContent:'center'}}>
+      <div style={{textAlign:'center'}}>
+        <div style={{fontSize:48,animation:'spin 1s linear infinite',display:'inline-block'}}>⚡</div>
+        <div style={{fontFamily:FONT_HEAD,fontSize:28,color:C.yellow,letterSpacing:'0.1em',marginTop:16}}>{text}</div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Print Preview ── */
+function PrintPreview({invoice,business,onClose}) {
+  const sub=getSubtotal(invoice);
+  const tax=sub*((invoice.tax_rate||0)/100);
+  const disc=sub*((invoice.discount||0)/100);
+  const total=sub+tax-disc;
+  const s=sym(business.currency);
+  return (
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.85)',zIndex:1000,display:'flex',alignItems:'center',justifyContent:'center',padding:24,backdropFilter:'blur(8px)'}}>
+      <div style={{background:'#fff',borderRadius:16,width:'100%',maxWidth:760,maxHeight:'92vh',overflow:'auto',boxShadow:'0 32px 80px rgba(0,0,0,0.6)'}}>
+        <div style={{display:'flex',gap:8,padding:'16px 24px',borderBottom:'1px solid #eee',background:'#fafafa'}}>
+          <Btn small onClick={()=>window.print()} style={{background:C.black,color:C.yellow}}>🖨 Print / PDF</Btn>
+          <div style={{flex:1}}/>
+          <Btn variant="ghost" small onClick={onClose} style={{color:'#666'}}>✕ Close</Btn>
+        </div>
+        <div style={{padding:56,fontFamily:"'DM Sans',sans-serif",color:'#111'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:48}}>
+            <div>
+              <div style={{fontSize:32,fontFamily:"'Bebas Neue',sans-serif",letterSpacing:'0.06em'}}>{business.name||'Yellow Light'}</div>
+              <div style={{marginTop:8,color:'#666',fontSize:13,lineHeight:1.8}}>
+                {business.address?.split('\n').map((l,i)=><div key={i}>{l}</div>)}
+                {business.email&&<div>{business.email}</div>}
+                {business.phone&&<div>{business.phone}</div>}
+                {business.website&&<div>{business.website}</div>}
+                {business.tax_id&&<div>Tax ID: {business.tax_id}</div>}
+              </div>
+            </div>
+            <div style={{textAlign:'right'}}>
+              <div style={{display:'inline-block',background:'#0a0a0a',color:'#f5c800',padding:'6px 20px',borderRadius:6,fontFamily:"'Bebas Neue',sans-serif",fontSize:32,letterSpacing:'0.1em',marginBottom:12}}>INVOICE</div>
+              <div style={{color:'#666',fontSize:13,lineHeight:2}}>
+                <div><strong style={{color:'#111'}}>#{invoice.number}</strong></div>
+                <div>Issued: {invoice.date}</div>
+                <div>Due: {invoice.due_date}</div>
+              </div>
+            </div>
+          </div>
+          <div style={{background:'#f8f8f8',borderRadius:10,padding:'18px 20px',marginBottom:36}}>
+            <div style={{fontSize:11,fontWeight:700,color:'#999',letterSpacing:'0.08em',textTransform:'uppercase',marginBottom:8}}>Bill To</div>
+            <div style={{fontWeight:700,fontSize:16}}>{invoice.client_name}</div>
+            {invoice.client_email&&<div style={{color:'#666',fontSize:13}}>{invoice.client_email}</div>}
+            {invoice.client_address&&<div style={{color:'#666',fontSize:13,marginTop:4}}>{invoice.client_address}</div>}
+          </div>
+          <table style={{width:'100%',borderCollapse:'collapse',marginBottom:28}}>
+            <thead>
+              <tr style={{background:'#0a0a0a'}}>
+                {['Description','Qty','Rate','Amount'].map((h,i)=>(
+                  <th key={h} style={{padding:'12px 16px',fontSize:11,fontWeight:700,color:'#f5c800',letterSpacing:'0.08em',textTransform:'uppercase',textAlign:i===0?'left':'right'}}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {(invoice.items||[]).map((item,i)=>(
+                <tr key={i} style={{borderBottom:'1px solid #f0f0f0',background:i%2===0?'#fff':'#fafafa'}}>
+                  <td style={{padding:'12px 16px',fontSize:14}}>{item.description}</td>
+                  <td style={{padding:'12px 16px',textAlign:'right',color:'#666',fontSize:14}}>{item.qty}</td>
+                  <td style={{padding:'12px 16px',textAlign:'right',color:'#666',fontSize:14}}>{s}{fmt(item.price)}</td>
+                  <td style={{padding:'12px 16px',textAlign:'right',fontWeight:600,fontSize:14}}>{s}{fmt(item.qty*item.price)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{display:'flex',justifyContent:'flex-end'}}>
+            <div style={{minWidth:280}}>
+              {[['Subtotal',sub],invoice.tax_rate>0&&[`Tax (${invoice.tax_rate}%)`,tax],invoice.discount>0&&[`Discount (${invoice.discount}%)`,-disc]].filter(Boolean).map(([lbl,val])=>(
+                <div key={lbl} style={{display:'flex',justifyContent:'space-between',padding:'6px 0',color:'#666',fontSize:14}}>
+                  <span>{lbl}</span><span style={{color:val<0?'green':undefined}}>{val<0?'-':''}{s}{fmt(Math.abs(val))}</span>
+                </div>
+              ))}
+              <div style={{display:'flex',justifyContent:'space-between',padding:'14px 16px',background:'#0a0a0a',borderRadius:8,marginTop:8,fontWeight:800,fontSize:20}}>
+                <span style={{color:'#fff'}}>Total Due</span><span style={{color:'#f5c800'}}>{s}{fmt(total)}</span>
+              </div>
+            </div>
+          </div>
+          {invoice.notes&&(
+            <div style={{marginTop:32,padding:'16px 20px',borderLeft:'3px solid #f5c800',background:'#fffbea',borderRadius:'0 8px 8px 0'}}>
+              <div style={{fontSize:11,fontWeight:700,color:'#c9a200',textTransform:'uppercase',letterSpacing:'0.08em',marginBottom:6}}>Notes</div>
+              <div style={{fontSize:13,color:'#555',lineHeight:1.7}}>{invoice.notes}</div>
+            </div>
+          )}
+          <div style={{marginTop:48,paddingTop:24,borderTop:'2px solid #0a0a0a',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <div style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:18,letterSpacing:'0.06em'}}>{business.name}</div>
+            <div style={{fontSize:12,color:'#999'}}>Thank you for your business.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Invoice Editor ── */
+function InvoiceEditor({invoice,clients,nextNum,onSave,onCancel,saving}) {
+  const blank = {number:`INV-${nextNum}`,date:today(),due_date:addDays(today(),30),client_name:'',client_email:'',client_phone:'',client_address:'',project_name:'',po_number:'',items:[{id:uid(),description:'',qty:1,price:0,note:''}],tax_rate:0,discount:0,notes:'',status:'draft'};
+  const [f,setF]=useState(invoice?{...invoice,items:invoice.items||[{id:uid(),description:'',qty:1,price:0,note:''}]}:blank);
+  const set=k=>v=>setF(p=>({...p,[k]:v}));
+  const setItem=(i,k)=>v=>setF(p=>{const items=[...p.items];items[i]={...items[i],[k]:v};return{...p,items};});
+  const addItem=()=>setF(p=>({...p,items:[...p.items,{id:uid(),description:'',qty:1,price:0,note:''}]}));
+  const removeItem=i=>setF(p=>({...p,items:p.items.filter((_,j)=>j!==i)}));
+  const dupItem=i=>setF(p=>{const items=[...p.items];items.splice(i+1,0,{...items[i],id:uid()});return{...p,items};});
+  const fillClient=name=>{const c=clients.find(c=>c.name===name);setF(p=>({...p,client_name:name,client_email:c?.email||p.client_email,client_phone:c?.phone||p.client_phone,client_address:c?.address||p.client_address}));};
+  const sub=f.items.reduce((s,i)=>s+Number(i.qty)*Number(i.price),0);
+  const tax=sub*((f.tax_rate||0)/100);
+  const disc=sub*((f.discount||0)/100);
+  const total=sub+tax-disc;
+  return (
+    <div style={{maxWidth:860,margin:'0 auto'}} className="fade-up">
+      <div style={{display:'flex',alignItems:'center',gap:16,marginBottom:28}}>
+        <button onClick={onCancel} style={{background:'none',border:'none',color:C.muted,cursor:'pointer',fontSize:20}}>←</button>
+        <div style={{fontFamily:FONT_HEAD,fontSize:28,letterSpacing:'0.06em',color:C.yellow}}>{invoice?'EDIT INVOICE':'NEW INVOICE'}</div>
+        <div style={{flex:1}}/>
+        <Btn variant="secondary" small onClick={onCancel}>Cancel</Btn>
+        <Btn small onClick={()=>onSave(f)} disabled={saving}>{saving?'Saving…':'💾 Save Invoice'}</Btn>
+      </div>
+      <div style={{display:'grid',gap:16}}>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr',gap:14}}>
+          {[{label:'Invoice #',key:'number',required:true},{label:'Issue Date',key:'date',type:'date'},{label:'Due Date',key:'due_date',type:'date'},{label:'Status',key:'status',options:['draft','sent','paid','overdue','partial'].map(v=>({value:v,label:v.charAt(0).toUpperCase()+v.slice(1)}))}].map(fd=>(
+            <GlassCard key={fd.key} style={{padding:16}}><Field {...fd} value={f[fd.key]} onChange={set(fd.key)}/></GlassCard>
+          ))}
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
+          <GlassCard style={{padding:20}}>
+            <div style={{fontFamily:FONT_HEAD,fontSize:16,letterSpacing:'0.06em',color:C.yellow,marginBottom:16}}>CLIENT</div>
+            <div style={{display:'grid',gap:12}}>
+              <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                <label style={{fontSize:11,fontWeight:600,color:C.muted,letterSpacing:'0.07em',textTransform:'uppercase'}}>Client Name <span style={{color:C.yellow}}>*</span></label>
+                <input list="yl-clients-list" value={f.client_name||''} onChange={e=>fillClient(e.target.value)} placeholder="Select or type…"
+                  style={{background:'rgba(255,255,255,0.05)',border:`1px solid ${C.border}`,borderRadius:10,padding:'10px 14px',fontSize:14,fontFamily:FONT_BODY,color:C.white,outline:'none',width:'100%'}}/>
+                <datalist id="yl-clients-list">{clients.map(c=><option key={c.id} value={c.name}/>)}</datalist>
+              </div>
+              <Field label="Email" value={f.client_email} onChange={set('client_email')} type="email"/>
+              <Field label="Phone" value={f.client_phone} onChange={set('client_phone')}/>
+              <Field label="Address" value={f.client_address} onChange={set('client_address')} multiline rows={2}/>
+            </div>
+          </GlassCard>
+          <GlassCard style={{padding:20}}>
+            <div style={{fontFamily:FONT_HEAD,fontSize:16,letterSpacing:'0.06em',color:C.yellow,marginBottom:16}}>PROJECT</div>
+            <div style={{display:'grid',gap:12}}>
+              <Field label="Project Name" value={f.project_name} onChange={set('project_name')} placeholder="Website Redesign"/>
+              <Field label="PO Number" value={f.po_number} onChange={set('po_number')} placeholder="PO-2024-001"/>
+              <Field label="Notes / Terms" value={f.notes} onChange={set('notes')} multiline rows={4}/>
+            </div>
+          </GlassCard>
+        </div>
+        <GlassCard style={{padding:24}}>
+          <div style={{fontFamily:FONT_HEAD,fontSize:16,letterSpacing:'0.06em',color:C.yellow,marginBottom:20}}>LINE ITEMS</div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 80px 120px 120px 72px',gap:'8px 12px',marginBottom:10}}>
+            {['Description','Qty','Rate','Amount',''].map(h=>(
+              <div key={h} style={{fontSize:11,fontWeight:600,color:C.muted,textTransform:'uppercase',letterSpacing:'0.07em',textAlign:h==='Amount'||h==='Rate'?'right':'left'}}>{h}</div>
+            ))}
+          </div>
+          {f.items.map((item,i)=>(
+            <div key={item.id} style={{display:'grid',gridTemplateColumns:'1fr 80px 120px 120px 72px',gap:'6px 12px',alignItems:'start',marginBottom:8}}>
+              <div>
+                <input value={item.description||''} onChange={e=>setItem(i,'description')(e.target.value)} placeholder="Service or product"
+                  style={{background:'rgba(255,255,255,0.05)',border:`1px solid ${C.border}`,borderRadius:8,padding:'9px 12px',fontSize:14,fontFamily:FONT_BODY,color:C.white,outline:'none',width:'100%',marginBottom:4}}/>
+                <input value={item.note||''} onChange={e=>setItem(i,'note')(e.target.value)} placeholder="Optional note…"
+                  style={{background:'transparent',border:'none',padding:'3px 12px',fontSize:12,fontFamily:FONT_BODY,color:C.muted,outline:'none',width:'100%'}}/>
+              </div>
+              {['qty','price'].map(k=>(
+                <input key={k} type="number" value={item[k]||0} onChange={e=>setItem(i,k)(e.target.value)} min="0" step={k==='price'?'0.01':'1'}
+                  style={{background:'rgba(255,255,255,0.05)',border:`1px solid ${C.border}`,borderRadius:8,padding:'9px 10px',fontSize:14,fontFamily:FONT_BODY,color:C.white,outline:'none',width:'100%',textAlign:'right'}}/>
+              ))}
+              <div style={{padding:'9px 0',fontWeight:600,fontSize:14,textAlign:'right',color:C.yellow}}>${fmt(item.qty*item.price)}</div>
+              <div style={{display:'flex',gap:4}}>
+                <button onClick={()=>dupItem(i)} title="Duplicate" style={{background:C.whiteFaint,border:'none',borderRadius:6,padding:'6px 8px',cursor:'pointer',color:C.muted,fontSize:12}}>⧉</button>
+                <button onClick={()=>removeItem(i)} disabled={f.items.length===1} style={{background:C.redDim,border:'none',borderRadius:6,padding:'6px 8px',cursor:f.items.length===1?'not-allowed':'pointer',color:C.red,fontSize:12,opacity:f.items.length===1?0.3:1}}>✕</button>
+              </div>
+            </div>
+          ))}
+          <Btn variant="secondary" small onClick={addItem} style={{marginTop:12}}>+ Add Line Item</Btn>
+          <div style={{display:'flex',justifyContent:'flex-end',marginTop:24}}>
+            <div style={{minWidth:300}}>
+              <div style={{display:'flex',justifyContent:'space-between',color:C.muted,fontSize:14,padding:'6px 0'}}><span>Subtotal</span><span>${fmt(sub)}</span></div>
+              {[{lbl:'Tax',k:'tax_rate',val:tax},{lbl:'Discount',k:'discount',val:disc}].map(({lbl,k,val})=>(
+                <div key={k} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'6px 0',gap:8}}>
+                  <div style={{display:'flex',alignItems:'center',gap:8,color:C.muted,fontSize:14}}>
+                    <span>{lbl}</span>
+                    <input type="number" value={f[k]||0} onChange={e=>set(k)(e.target.value)} min="0" max="100" step="0.5"
+                      style={{width:52,background:C.whiteFaint,border:`1px solid ${C.border}`,borderRadius:6,padding:'3px 8px',fontSize:13,color:C.white,textAlign:'center',fontFamily:FONT_BODY}}/>
+                    <span>%</span>
+                  </div>
+                  <span style={{color:lbl==='Discount'?C.green:C.muted,fontSize:14}}>{lbl==='Discount'?'-':''}${fmt(val)}</span>
+                </div>
+              ))}
+              <div style={{display:'flex',justifyContent:'space-between',fontWeight:800,fontSize:22,padding:'14px 18px',background:`linear-gradient(135deg,${C.yellow}22,${C.yellow}08)`,border:`1px solid ${C.borderYellow}`,borderRadius:10,marginTop:8}}>
+                <span style={{color:C.white}}>Total</span><span style={{color:C.yellow}}>${fmt(total)}</span>
+              </div>
+            </div>
+          </div>
+        </GlassCard>
+      </div>
+    </div>
+  );
+}
+
+/* ── Dashboard ── */
+function Dashboard({invoices,business,onNew,onEdit,onDelete,onStatusChange,loading}) {
+  const [filter,setFilter]=useState('all');
+  const [search,setSearch]=useState('');
+  const [sort,setSort]=useState('date_desc');
+  const [printInv,setPrintInv]=useState(null);
+  const [quickView,setQuickView]=useState(null);
+  const s=sym(business.currency);
+  const filtered=invoices.filter(inv=>{
+    if(filter!=='all'&&inv.status!==filter)return false;
+    const q=search.toLowerCase();
+    return !q||inv.client_name?.toLowerCase().includes(q)||inv.number?.toLowerCase().includes(q)||inv.project_name?.toLowerCase().includes(q);
+  }).sort((a,b)=>{
+    if(sort==='date_desc')return(b.date||'').localeCompare(a.date||'');
+    if(sort==='date_asc')return(a.date||'').localeCompare(b.date||'');
+    if(sort==='amount_desc')return getTotal(b)-getTotal(a);
+    if(sort==='amount_asc')return getTotal(a)-getTotal(b);
+    return 0;
+  });
+  const paid=invoices.filter(i=>i.status==='paid').reduce((s,i)=>s+getTotal(i),0);
+  const outstanding=invoices.filter(i=>['sent','partial'].includes(i.status)).reduce((s,i)=>s+getTotal(i),0);
+  const overdue=invoices.filter(i=>i.status==='overdue').reduce((s,i)=>s+getTotal(i),0);
+  return (
+    <div className="fade-up">
+      {printInv&&<PrintPreview invoice={printInv} business={business} onClose={()=>setPrintInv(null)}/>}
+      {quickView&&(
+        <Modal title={`Invoice #${quickView.number}`} onClose={()=>setQuickView(null)} wide>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16,marginBottom:20}}>
+            <div><span style={{color:C.muted,fontSize:12}}>CLIENT</span><div style={{fontWeight:700,marginTop:4}}>{quickView.client_name}</div></div>
+            <div><span style={{color:C.muted,fontSize:12}}>TOTAL</span><div style={{fontWeight:700,color:C.yellow,fontSize:22,marginTop:4}}>{s}{fmt(getTotal(quickView))}</div></div>
+            <div><span style={{color:C.muted,fontSize:12}}>ISSUED</span><div style={{marginTop:4}}>{quickView.date}</div></div>
+            <div><span style={{color:C.muted,fontSize:12}}>DUE</span><div style={{marginTop:4}}>{quickView.due_date}</div></div>
+          </div>
+          <div style={{marginBottom:16}}>
+            <div style={{color:C.muted,fontSize:12,marginBottom:8}}>CHANGE STATUS</div>
+            <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+              {['draft','sent','paid','overdue','partial'].map(st=>(
+                <button key={st} onClick={()=>{onStatusChange(quickView.id,st);setQuickView(p=>({...p,status:st}));}}
+                  style={{background:quickView.status===st?C.yellow:C.whiteFaint2,color:quickView.status===st?C.black:C.muted,border:'none',borderRadius:8,padding:'6px 14px',fontSize:13,fontWeight:600,cursor:'pointer',fontFamily:FONT_BODY,textTransform:'capitalize'}}>
+                  {st}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div style={{display:'flex',gap:8,marginTop:20}}>
+            <Btn small onClick={()=>{setPrintInv(quickView);setQuickView(null);}}>🖨 Print Preview</Btn>
+            <Btn variant="secondary" small onClick={()=>{onEdit(quickView);setQuickView(null);}}>✏️ Edit</Btn>
+          </div>
+        </Modal>
+      )}
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:14,marginBottom:28}}>
+        <StatCard icon="💰" label="Revenue (Paid)" value={`${s}${fmt(paid)}`} yellow/>
+        <StatCard icon="📬" label="Outstanding" value={`${s}${fmt(outstanding)}`}/>
+        <StatCard icon="⚠️" label="Overdue" value={`${s}${fmt(overdue)}`}/>
+        <StatCard icon="📝" label="Total Invoices" value={invoices.length}/>
+      </div>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16,gap:12,flexWrap:'wrap'}}>
+        <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+          {['all','draft','sent','paid','overdue','partial'].map(f=>(
+            <button key={f} onClick={()=>setFilter(f)}
+              style={{padding:'6px 16px',borderRadius:20,border:`1px solid ${filter===f?C.yellow:C.border}`,background:filter===f?C.yellowFaint:'transparent',color:filter===f?C.yellow:C.muted,fontWeight:600,fontSize:12,cursor:'pointer',textTransform:'capitalize',fontFamily:FONT_BODY,transition:'all 0.15s'}}>
+              {f==='all'?`All (${invoices.length})`:f}
+            </button>
+          ))}
+        </div>
+        <div style={{display:'flex',gap:10,alignItems:'center'}}>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 Search…"
+            style={{background:C.whiteFaint2,border:`1px solid ${C.border}`,borderRadius:10,padding:'8px 14px',fontSize:13,fontFamily:FONT_BODY,color:C.white,outline:'none',width:200}}/>
+          <select value={sort} onChange={e=>setSort(e.target.value)}
+            style={{background:C.blackSoft,border:`1px solid ${C.border}`,borderRadius:10,padding:'8px 12px',fontSize:13,fontFamily:FONT_BODY,color:C.muted,outline:'none'}}>
+            <option value="date_desc">Newest First</option>
+            <option value="date_asc">Oldest First</option>
+            <option value="amount_desc">Highest Amount</option>
+            <option value="amount_asc">Lowest Amount</option>
+          </select>
+          <Btn small onClick={onNew}>⚡ New Invoice</Btn>
+        </div>
+      </div>
+      {loading?<GlassCard style={{textAlign:'center',padding:48}}><div style={{fontSize:32,animation:'spin 1s linear infinite',display:'inline-block'}}>⚡</div></GlassCard>:
+      filtered.length===0?(
+        <GlassCard style={{textAlign:'center',padding:'64px 0'}}>
+          <div style={{fontSize:56,marginBottom:16,animation:'float 3s ease-in-out infinite'}}>⚡</div>
+          <div style={{fontFamily:FONT_HEAD,fontSize:28,letterSpacing:'0.06em',color:C.yellow,marginBottom:8}}>NO INVOICES YET</div>
+          <div style={{color:C.muted,marginBottom:24}}>Create your first invoice to get started</div>
+          <Btn onClick={onNew}>⚡ Create Invoice</Btn>
+        </GlassCard>
+      ):(
+        <GlassCard style={{padding:0,overflow:'hidden'}}>
+          <table style={{width:'100%',borderCollapse:'collapse'}}>
+            <thead>
+              <tr style={{borderBottom:`1px solid ${C.border}`}}>
+                {['#','Client','Project','Date','Due','Amount','Status',''].map((h,i)=>(
+                  <th key={h} style={{padding:'12px 16px',fontSize:11,fontWeight:700,color:C.muted,textTransform:'uppercase',letterSpacing:'0.06em',textAlign:i===5?'right':'left'}}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((inv,i)=>(
+                <tr key={inv.id} className="row-item" style={{borderBottom:i<filtered.length-1?`1px solid ${C.border}`:'none'}}>
+                  <td style={{padding:'13px 16px',fontWeight:700,fontSize:14,color:C.yellow}}>{inv.number}</td>
+                  <td style={{padding:'13px 16px',fontSize:14,color:C.white}}>{inv.client_name}</td>
+                  <td style={{padding:'13px 16px',fontSize:13,color:C.muted}}>{inv.project_name||'—'}</td>
+                  <td style={{padding:'13px 16px',fontSize:13,color:C.muted}}>{inv.date}</td>
+                  <td style={{padding:'13px 16px',fontSize:13,color:inv.status==='overdue'?C.red:C.muted}}>{inv.due_date}</td>
+                  <td style={{padding:'13px 16px',fontWeight:700,fontSize:15,textAlign:'right',color:C.white}}>{s}{fmt(getTotal(inv))}</td>
+                  <td style={{padding:'13px 16px'}}><Badge status={inv.status}/></td>
+                  <td style={{padding:'13px 16px'}}>
+                    <div style={{display:'flex',gap:4}}>
+                      <Btn variant="ghost" small onClick={()=>setQuickView(inv)} title="Quick view" style={{fontSize:16,padding:'4px 8px'}}>👁</Btn>
+                      <Btn variant="ghost" small onClick={()=>setPrintInv(inv)} title="Print" style={{fontSize:16,padding:'4px 8px'}}>🖨</Btn>
+                      <Btn variant="ghost" small onClick={()=>onEdit(inv)} title="Edit" style={{fontSize:16,padding:'4px 8px'}}>✏️</Btn>
+                      <Btn variant="danger" small onClick={()=>onDelete(inv.id)} title="Delete" style={{fontSize:16,padding:'4px 8px'}}>🗑</Btn>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </GlassCard>
+      )}
+    </div>
+  );
+}
+
+/* ── Clients Page ── */
+function ClientsPage({clients,invoices,onSave,onDelete,loading}) {
+  const empty={name:'',email:'',phone:'',address:'',company:'',notes:''};
+  const [form,setForm]=useState(empty);
+  const [editing,setEditing]=useState(null);
+  const [search,setSearch]=useState('');
+  const set=k=>v=>setForm(p=>({...p,[k]:v}));
+  const handleSave=()=>{if(!form.name)return;onSave(editing?{...form,id:editing}:{...form,id:uid()});setForm(empty);setEditing(null);};
+  const filtered=clients.filter(c=>c.name.toLowerCase().includes(search.toLowerCase())||c.email?.toLowerCase().includes(search.toLowerCase()));
+  const clientRevenue=name=>invoices.filter(i=>i.client_name===name&&i.status==='paid').reduce((s,i)=>s+getTotal(i),0);
+  return (
+    <div className="fade-up" style={{maxWidth:940}}>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:28}}>
+        <div style={{fontFamily:FONT_HEAD,fontSize:32,letterSpacing:'0.06em',color:C.yellow}}>CLIENTS</div>
+        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍 Search…"
+          style={{background:C.whiteFaint2,border:`1px solid ${C.border}`,borderRadius:10,padding:'9px 16px',fontSize:14,fontFamily:FONT_BODY,color:C.white,outline:'none',width:240}}/>
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'340px 1fr',gap:20}}>
+        <GlassCard style={{padding:24,height:'fit-content'}}>
+          <div style={{fontFamily:FONT_HEAD,fontSize:16,letterSpacing:'0.06em',color:C.yellow,marginBottom:18}}>{editing?'EDIT CLIENT':'ADD CLIENT'}</div>
+          <div style={{display:'grid',gap:14}}>
+            <Field label="Full Name" value={form.name} onChange={set('name')} placeholder="Jane Smith" required/>
+            <Field label="Company" value={form.company} onChange={set('company')} placeholder="Acme Corp"/>
+            <Field label="Email" value={form.email} onChange={set('email')} type="email" placeholder="jane@example.com"/>
+            <Field label="Phone" value={form.phone} onChange={set('phone')}/>
+            <Field label="Address" value={form.address} onChange={set('address')} multiline rows={2}/>
+            <Field label="Notes" value={form.notes} onChange={set('notes')} multiline rows={2}/>
+            <div style={{display:'flex',gap:8,marginTop:4}}>
+              <Btn full onClick={handleSave}>{editing?'✓ Update':'+ Add Client'}</Btn>
+              {editing&&<Btn variant="ghost" onClick={()=>{setEditing(null);setForm(empty);}}>Cancel</Btn>}
+            </div>
+          </div>
+        </GlassCard>
+        <div>
+          {loading?<GlassCard style={{textAlign:'center',padding:48}}><div style={{fontSize:32,animation:'spin 1s linear infinite',display:'inline-block'}}>⚡</div></GlassCard>:
+          filtered.length===0?<GlassCard style={{textAlign:'center',padding:48}}><div style={{fontSize:40,marginBottom:12}}>👥</div><div style={{color:C.muted}}>No clients yet.</div></GlassCard>:
+          filtered.map(c=>(
+            <GlassCard key={c.id} className="row-item" style={{marginBottom:12,padding:'18px 20px'}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
+                <div>
+                  <div style={{fontWeight:700,fontSize:16,color:C.white}}>{c.name}</div>
+                  {c.company&&<div style={{color:C.yellow,fontSize:13,fontWeight:500}}>{c.company}</div>}
+                  <div style={{color:C.muted,fontSize:13,marginTop:4,display:'flex',gap:16}}>
+                    {c.email&&<span>✉ {c.email}</span>}
+                    {c.phone&&<span>📞 {c.phone}</span>}
+                  </div>
+                </div>
+                <div style={{textAlign:'right'}}>
+                  <div style={{color:C.yellow,fontWeight:700,fontSize:16}}>${fmt(clientRevenue(c.name))}</div>
+                  <div style={{color:C.muted,fontSize:12}}>paid revenue</div>
+                  <div style={{display:'flex',gap:6,marginTop:8}}>
+                    <Btn variant="secondary" small onClick={()=>{setForm(c);setEditing(c.id);}}>Edit</Btn>
+                    <Btn variant="danger" small onClick={()=>onDelete(c.id)}>Del</Btn>
+                  </div>
+                </div>
+              </div>
+            </GlassCard>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Expenses Page ── */
+function ExpensesPage({expenses,onSave,onDelete,loading}) {
+  const empty={description:'',amount:0,category:'General',date:today(),receipt:''};
+  const [form,setForm]=useState(empty);
+  const set=k=>v=>setForm(p=>({...p,[k]:v}));
+  const cats=['General','Travel','Software','Hardware','Marketing','Office','Meals','Other'];
+  const total=expenses.reduce((s,e)=>s+Number(e.amount),0);
+  const thisMonth=expenses.filter(e=>e.date?.startsWith(new Date().toISOString().slice(0,7))).reduce((s,e)=>s+Number(e.amount),0);
+  return (
+    <div className="fade-up" style={{maxWidth:860}}>
+      <div style={{fontFamily:FONT_HEAD,fontSize:32,letterSpacing:'0.06em',color:C.yellow,marginBottom:24}}>EXPENSES</div>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:14,marginBottom:24}}>
+        <StatCard icon="💸" label="Total Expenses" value={`$${fmt(total)}`} yellow/>
+        <StatCard icon="📅" label="This Month" value={`$${fmt(thisMonth)}`}/>
+        <StatCard icon="📋" label="Records" value={expenses.length}/>
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'300px 1fr',gap:20}}>
+        <GlassCard style={{padding:22,height:'fit-content'}}>
+          <div style={{fontFamily:FONT_HEAD,fontSize:15,letterSpacing:'0.06em',color:C.yellow,marginBottom:16}}>ADD EXPENSE</div>
+          <div style={{display:'grid',gap:12}}>
+            <Field label="Description" value={form.description} onChange={set('description')} placeholder="Adobe CC subscription" required/>
+            <Field label="Amount ($)" value={form.amount} onChange={set('amount')} type="number"/>
+            <Field label="Category" value={form.category} onChange={set('category')} options={cats}/>
+            <Field label="Date" value={form.date} onChange={set('date')} type="date"/>
+            <Field label="Receipt / Note" value={form.receipt} onChange={set('receipt')}/>
+            <Btn full onClick={()=>{if(!form.description)return;onSave({...form,id:uid()});setForm(empty);}}>+ Add Expense</Btn>
+          </div>
+        </GlassCard>
+        <div>
+          {loading?<GlassCard style={{textAlign:'center',padding:48}}><div style={{fontSize:32,animation:'spin 1s linear infinite',display:'inline-block'}}>⚡</div></GlassCard>:
+          expenses.length===0?<GlassCard style={{textAlign:'center',padding:48}}><div style={{fontSize:40,marginBottom:12}}>💸</div><div style={{color:C.muted}}>No expenses yet.</div></GlassCard>:
+          [...expenses].sort((a,b)=>(b.date||'').localeCompare(a.date||'')).map(e=>(
+            <GlassCard key={e.id} className="row-item" style={{marginBottom:10,padding:'14px 18px'}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                <div>
+                  <div style={{fontWeight:600,fontSize:14,color:C.white}}>{e.description}</div>
+                  <div style={{color:C.muted,fontSize:12,marginTop:2}}>{e.category} · {e.date}</div>
+                </div>
+                <div style={{display:'flex',alignItems:'center',gap:12}}>
+                  <div style={{fontWeight:700,fontSize:16,color:C.red}}>-${fmt(e.amount)}</div>
+                  <Btn variant="danger" small onClick={()=>onDelete(e.id)}>✕</Btn>
+                </div>
+              </div>
+            </GlassCard>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Settings Page ── */
+function SettingsPage({business,onSave,saving}) {
+  const [f,setF]=useState(business);
+  useEffect(()=>setF(business),[business]);
+  const set=k=>v=>setF(p=>({...p,[k]:v}));
+  const currencies=['USD','EUR','GBP','CAD','AUD','JPY','CHF','MXN'];
+  return (
+    <div className="fade-up" style={{maxWidth:600}}>
+      <div style={{fontFamily:FONT_HEAD,fontSize:32,letterSpacing:'0.06em',color:C.yellow,marginBottom:24}}>SETTINGS</div>
+      <div style={{display:'grid',gap:16}}>
+        <GlassCard>
+          <div style={{fontFamily:FONT_HEAD,fontSize:15,letterSpacing:'0.06em',color:C.yellow,marginBottom:18}}>BUSINESS INFO</div>
+          <div style={{display:'grid',gap:14}}>
+            <Field label="Business Name" value={f.name} onChange={set('name')} required/>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14}}>
+              <Field label="Email" value={f.email} onChange={set('email')} type="email"/>
+              <Field label="Phone" value={f.phone} onChange={set('phone')}/>
+            </div>
+            <Field label="Website" value={f.website} onChange={set('website')} placeholder="https://yellowlight.com"/>
+            <Field label="Address" value={f.address} onChange={set('address')} multiline rows={3}/>
+          </div>
+        </GlassCard>
+        <GlassCard>
+          <div style={{fontFamily:FONT_HEAD,fontSize:15,letterSpacing:'0.06em',color:C.yellow,marginBottom:18}}>BILLING & TAX</div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14}}>
+            <Field label="Tax ID / VAT Number" value={f.tax_id} onChange={set('tax_id')} placeholder="XX-XXXXXXX"/>
+            <Field label="Currency" value={f.currency} onChange={set('currency')} options={currencies}/>
+          </div>
+          <div style={{marginTop:14}}>
+            <Field label="Default Payment Terms" value={f.payment_terms} onChange={set('payment_terms')} multiline rows={3}/>
+          </div>
+        </GlassCard>
+        <Btn onClick={()=>onSave(f)} disabled={saving}>{saving?'Saving…':'💾 Save Settings'}</Btn>
+      </div>
+    </div>
+  );
+}
+
+/* ── Main App ── */
+export default function App() {
+  const [invoices,setInvoices]=useState([]);
+  const [clients,setClients]=useState([]);
+  const [expenses,setExpenses]=useState([]);
+  const [business,setBusiness]=useState({name:'Yellow Light',email:'',phone:'',address:'',website:'',tax_id:'',payment_terms:'Payment due within 30 days.',currency:'USD'});
+  const [nextNum,setNextNum]=useState(1001);
+  const [loading,setLoading]=useState(true);
+  const [saving,setSaving]=useState(false);
+  const [view,setView]=useState('invoices');
+  const [editingInv,setEditingInv]=useState(null);
+  const [toast,setToast]=useState(null);
+
+  const showToast=(msg,type='success')=>{setToast({msg,type});setTimeout(()=>setToast(null),3500);};
+
+  // Load all data from Supabase
+  useEffect(()=>{
+    (async()=>{
+      setLoading(true);
+      try {
+        const [inv,cli,exp,biz]=await Promise.all([
+          supabase.from('invoices').select('*').eq('user_id',USER_ID).order('created_at',{ascending:false}),
+          supabase.from('clients').select('*').eq('user_id',USER_ID).order('name'),
+          supabase.from('expenses').select('*').eq('user_id',USER_ID).order('date',{ascending:false}),
+          supabase.from('business').select('*').eq('user_id',USER_ID).single(),
+        ]);
+        if(inv.data)setInvoices(inv.data);
+        if(cli.data)setClients(cli.data);
+        if(exp.data)setExpenses(exp.data);
+        if(biz.data){setBusiness(biz.data);setNextNum(biz.data.next_num||1001);}
+      } catch(e){console.error(e);}
+      setLoading(false);
+    })();
+  },[]);
+
+  const saveInvoice=async(form)=>{
+    setSaving(true);
+    try {
+      const row={...form,user_id:USER_ID,items:form.items||[]};
+      if(form.id&&invoices.find(i=>i.id===form.id)){
+        const {data,error}=await supabase.from('invoices').update(row).eq('id',form.id).select().single();
+        if(error)throw error;
+        setInvoices(p=>p.map(i=>i.id===data.id?data:i));
+      } else {
+        if(!row.number)row.number=`INV-${nextNum}`;
+        const {data,error}=await supabase.from('invoices').insert({...row,id:undefined}).select().single();
+        if(error)throw error;
+        setInvoices(p=>[data,...p]);
+        const newNum=nextNum+1;
+        setNextNum(newNum);
+        await supabase.from('business').upsert({user_id:USER_ID,next_num:newNum},{onConflict:'user_id'});
+      }
+      setEditingInv(null);setView('invoices');showToast('Invoice saved!');
+    } catch(e){showToast('Error saving invoice: '+e.message,'error');}
+    setSaving(false);
+  };
+
+  const deleteInvoice=async(id)=>{
+    if(!window.confirm('Delete this invoice?'))return;
+    await supabase.from('invoices').delete().eq('id',id);
+    setInvoices(p=>p.filter(i=>i.id!==id));
+    showToast('Invoice deleted.','error');
+  };
+
+  const statusChange=async(id,status)=>{
+    await supabase.from('invoices').update({status}).eq('id',id);
+    setInvoices(p=>p.map(i=>i.id===id?{...i,status}:i));
+    showToast(`Status → ${status}`);
+  };
+
+  const saveClient=async(client)=>{
+    try {
+      const row={...client,user_id:USER_ID};
+      if(clients.find(c=>c.id===client.id)){
+        const {data}=await supabase.from('clients').update(row).eq('id',client.id).select().single();
+        setClients(p=>p.map(c=>c.id===data.id?data:c));
+      } else {
+        const {data}=await supabase.from('clients').insert({...row,id:undefined}).select().single();
+        setClients(p=>[...p,data]);
+      }
+      showToast('Client saved!');
+    } catch(e){showToast('Error: '+e.message,'error');}
+  };
+
+  const deleteClient=async(id)=>{
+    if(!window.confirm('Delete client?'))return;
+    await supabase.from('clients').delete().eq('id',id);
+    setClients(p=>p.filter(c=>c.id!==id));
+  };
+
+  const saveExpense=async(expense)=>{
+    try {
+      const {data}=await supabase.from('expenses').insert({...expense,id:undefined,user_id:USER_ID}).select().single();
+      setExpenses(p=>[data,...p]);
+      showToast('Expense logged!');
+    } catch(e){showToast('Error: '+e.message,'error');}
+  };
+
+  const deleteExpense=async(id)=>{
+    await supabase.from('expenses').delete().eq('id',id);
+    setExpenses(p=>p.filter(e=>e.id!==id));
+  };
+
+  const saveBusiness=async(biz)=>{
+    setSaving(true);
+    try {
+      const row={...biz,user_id:USER_ID,next_num:nextNum};
+      await supabase.from('business').upsert(row,{onConflict:'user_id'});
+      setBusiness(biz);showToast('Settings saved!');
+    } catch(e){showToast('Error: '+e.message,'error');}
+    setSaving(false);
+  };
+
+  const startNew=()=>{
+    setEditingInv({number:`INV-${nextNum}`,date:today(),due_date:addDays(today(),30),client_name:'',client_email:'',client_phone:'',client_address:'',project_name:'',po_number:'',items:[{id:uid(),description:'',qty:1,price:0,note:''}],tax_rate:0,discount:0,notes:'',status:'draft'});
+    setView('edit');
+  };
+
+  if(loading)return <Loader text="LOADING…"/>;
+
+  const NAV=[{id:'invoices',icon:'⚡',label:'Invoices'},{id:'clients',icon:'👥',label:'Clients'},{id:'expenses',icon:'💸',label:'Expenses'},{id:'settings',icon:'⚙️',label:'Settings'}];
+  const counts={invoices:invoices.length,clients:clients.length,expenses:expenses.length};
+
+  return (
+    <div style={{minHeight:'100vh',background:`radial-gradient(ellipse 80% 60% at 20% 0%,rgba(245,200,0,0.06) 0%,transparent 60%),${C.black}`,fontFamily:FONT_BODY,display:'flex'}}>
+      {toast&&<Toast msg={toast.msg} type={toast.type}/>}
+      {/* Sidebar */}
+      <div style={{width:240,minHeight:'100vh',background:`linear-gradient(180deg,${C.blackDeep} 0%,${C.blackMid} 100%)`,borderRight:`1px solid ${C.border}`,display:'flex',flexDirection:'column',position:'sticky',top:0,flexShrink:0}}>
+        <div style={{padding:'32px 24px 28px'}}>
+          <div style={{display:'flex',alignItems:'center',gap:10}}>
+            <div style={{width:36,height:36,background:`linear-gradient(135deg,${C.yellow},${C.yellowDim})`,borderRadius:10,display:'flex',alignItems:'center',justifyContent:'center',fontSize:20,boxShadow:`0 4px 16px ${C.yellowGlow2}`}}>⚡</div>
+            <div>
+              <div style={{fontFamily:FONT_HEAD,fontSize:18,letterSpacing:'0.08em',color:C.yellow,lineHeight:1}}>YELLOW LIGHT</div>
+              <div style={{fontSize:10,color:C.muted,letterSpacing:'0.08em',textTransform:'uppercase'}}>Invoice Manager</div>
+            </div>
+          </div>
+        </div>
+        <div style={{padding:'0 16px 20px'}}>
+          <button onClick={startNew} style={{width:'100%',background:`linear-gradient(135deg,${C.yellow},${C.yellowDim})`,border:'none',borderRadius:12,padding:'11px 0',fontFamily:FONT_BODY,fontWeight:700,fontSize:14,color:C.black,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:6,boxShadow:`0 4px 20px ${C.yellowGlow2}`}}>
+            ⚡ New Invoice
+          </button>
+        </div>
+        <nav style={{flex:1,padding:'0 12px'}}>
+          {NAV.map(n=>{
+            const active=view===n.id||(view==='edit'&&n.id==='invoices');
+            return (
+              <button key={n.id} className="nav-item" onClick={()=>{setView(n.id);setEditingInv(null);}}
+                style={{display:'flex',alignItems:'center',gap:10,width:'100%',padding:'11px 14px',borderRadius:10,border:'none',background:active?C.yellowFaint:'transparent',color:active?C.yellow:C.muted,fontSize:14,fontWeight:active?600:400,cursor:'pointer',fontFamily:FONT_BODY,marginBottom:4,borderLeft:active?`2px solid ${C.yellow}`:'2px solid transparent'}}>
+                <span style={{fontSize:16}}>{n.icon}</span>
+                <span style={{flex:1,textAlign:'left'}}>{n.label}</span>
+                {counts[n.id]!==undefined&&<span style={{background:active?C.yellowGlow:C.whiteFaint,color:active?C.yellow:C.muted,fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:10}}>{counts[n.id]}</span>}
+              </button>
+            );
+          })}
+        </nav>
+        <div style={{padding:'20px 24px',borderTop:`1px solid ${C.border}`}}>
+          <div style={{fontSize:11,color:C.muted,lineHeight:1.8}}>
+            <div style={{fontWeight:600,color:C.whiteDim}}>{business.name}</div>
+            {business.email&&<div>{business.email}</div>}
+          </div>
+        </div>
+      </div>
+      {/* Main */}
+      <div style={{flex:1,padding:'40px 44px',overflowY:'auto',minHeight:'100vh'}}>
+        {view==='invoices'&&!editingInv&&<Dashboard invoices={invoices} business={business} onNew={startNew} onEdit={inv=>{setEditingInv(inv);setView('edit');}} onDelete={deleteInvoice} onStatusChange={statusChange} loading={loading}/>}
+        {view==='edit'&&editingInv&&<InvoiceEditor invoice={editingInv} clients={clients} nextNum={nextNum} onSave={saveInvoice} onCancel={()=>{setView('invoices');setEditingInv(null);}} saving={saving}/>}
+        {view==='clients'&&<ClientsPage clients={clients} invoices={invoices} onSave={saveClient} onDelete={deleteClient} loading={loading}/>}
+        {view==='expenses'&&<ExpensesPage expenses={expenses} onSave={saveExpense} onDelete={deleteExpense} loading={loading}/>}
+        {view==='settings'&&<SettingsPage business={business} onSave={saveBusiness} saving={saving}/>}
+      </div>
+    </div>
+  );
+}
